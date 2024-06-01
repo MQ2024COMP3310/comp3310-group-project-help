@@ -241,6 +241,48 @@ def add_comment(photo_id):
     response.headers['Content-Type'] = 'application/json'
     return response
 
+# View comments for a photo
+@main.route('/photo/<int:photo_id>/comments', methods=['GET'])
+def view_comments(photo_id):
+    comments = db.session.query(Comment).filter_by(photo_id=photo_id).all()
+    serialized_comments = [comment.serialize() for comment in comments]
+    return jsonify({"comments": serialized_comments}), 200
+
+# Edit a comment
+@main.route('/comment/<int:comment_id>/edit', methods=['PUT'])
+def edit_comment(comment_id):
+    user = authenticate_user()
+    if not user:
+        return jsonify({"error": "Unauthorized"}), 401  # Authentication check
+
+    comment = db.session.query(Comment).filter_by(id=comment_id, user_id=user['id']).one_or_none()
+    if not comment:
+        return jsonify({"error": "Comment not found or not owned by user"}), 404
+        content = request.json.get('content')
+    if content:
+        comment.content = content  # Input validation
+
+    db.session.add(comment)
+    db.session.commit()
+
+    return jsonify({"message": "Comment updated", "comment": comment.serialize()}), 200
+
+# Delete a comment
+@main.route('/comment/<int:comment_id>/delete', methods=['DELETE'])
+def delete_comment(comment_id):
+    user = authenticate_user()
+    if not user:
+        return jsonify({"error": "Unauthorized"}), 401  # Authentication check
+
+    comment = db.session.query(Comment).filter_by(id=comment_id, user_id=user['id']).one_or_none()
+    if not comment:
+        return jsonify({"error": "Comment not found or not owned by user"}), 404  # Authorization check
+
+    db.session.delete(comment)
+    db.session.commit()
+
+    return jsonify({"message": "Comment deleted"}), 200
+
 # TESTING
 
 # Create Album Authentication Test
