@@ -3,10 +3,13 @@ from flask import (
   flash, redirect, url_for, send_from_directory, 
   current_app, make_response, jsonify, json
 )
+from werkzeug.security import generate_password_hash, check_password_hash
+from flask_jwt_extended import create_access_token, jwt_required, get_jwt_identity
 from .models import Photo
 from sqlalchemy import asc, text
 from . import db
 import os
+from werkzeug.utils import secure_filename
 
 main = Blueprint('main', __name__)
 
@@ -20,27 +23,61 @@ def homepage():
 def display_file(name):
   return send_from_directory(current_app.config["UPLOAD_DIR"], name)
 
+  # Registration route
+@main.route('/register', methods=['POST'])
+def register():
+  data = request.get_json()
+    hashed_password = generate_password_hash(data['password'], method='bcrypt')  # Secure coding principle of password hashing
+    new_user = User(username=data['username'], password=hashed_password)
+    db.session.add(new_user)
+    db.session.commit()
+    # 201 Created: User registered successfully
+    return jsonify({'message': 'User registered successfully'}), 201
+
+
+  # Login route
+  @main.route('/login', methods=['POST'])
+  def login():
+    data = request.get_json()
+    user = User.query.filter_by(username=data['username']).first()
+    if user and check_password_hash(user.password, data['password']): # Secure password comparison
+        access_token = create_access_token(identity={'id': user.id, 'is_admin': user.is_admin})  # JWT token creation
+        # 200 OK: User logged in successfully
+        return jsonify(access_token=access_token), 200
+         # 401 Unauthorized: Invalid credentials
+    return jsonify({'message': 'Invalid credentials'}), 401
+
+
+  # Logout route
+  @main.route('/logout', methods=['POST'])
+  @jwt_required() # This ensure that only authenticated users can upload photos
+  # 200 OK: User logged out successfully
+  def logout():
+     return jsonify({'message': 'Logged out successfully'}), 200
+
+
 # Upload a new photo
 @main.route('/upload/', methods=['GET','POST'])
+# Secure coding principle of token-based authentication
+@jwt_required() # Ensure that only authenticated users can upload photos
 def newPhoto():
   if request.method == 'POST':
-    file = None
-    if "fileToUpload" in request.files:
-      file = request.files.get("fileToUpload")
-    else:
-      flash("Invalid request!", "error")
+    user_id = get_jwt_identity()['id'] # This securely get the authenticated user's ID from the JWT token
+    file = request.files.get("fileToUpload")
+        if not file or not file.filename:
+            flash("No file selected!", "error")
+            return redirect(request.url)
 
-    if not file or not file.filename:
-      flash("No file selected!", "error")
-      return redirect(request.url)
 
+    filename = secure_filename(file.filename) # Secure coding principle of input validation
     filepath = os.path.join(current_app.config["UPLOAD_DIR"], file.filename)
     file.save(filepath)
 
-    newPhoto = Photo(name = request.form['user'], 
+
+    newPhoto = Photo(user_id = user_id, name = request.form['user'],
                     caption = request.form['caption'],
                     description = request.form['description'],
-                    file = file.filename)
+                    file = filename)
     db.session.add(newPhoto)
     flash('New Photo %s Successfully Created' % newPhoto.name)
     db.session.commit()
@@ -48,12 +85,20 @@ def newPhoto():
   else:
     return render_template('upload.html')
 
+
+
+
 # This is called when clicking on Edit. Goes to the edit page.
 @main.route('/photo/<int:photo_id>/edit/', methods = ['GET', 'POST'])
+# Secure coding principle of token-based authentication
+@jwt_required() # Ensure that only authenticated users can upload photos
 def editPhoto(photo_id):
-  editedPhoto = db.session.query(Photo).filter_by(id = photo_id).one()
-  if request.method == 'POST':
-    if request.form['user']:
+  user_id = get_jwt_identity()['id'] # This securely get the authenticated user's ID from the JWT token
+  editedPhoto = Photo.query.get(photo_id)
+  if editedPhoto.user_id != user_id and not get_jwt_identity()['is_admin']:
+    flash('Unauthorized access', 'error')
+    return redirect(url_for('main.homepage'))
+    if request.method == 'POST':
       editedPhoto.name = request.form['user']
       editedPhoto.caption = request.form['caption']
       editedPhoto.description = request.form['description']
@@ -65,16 +110,23 @@ def editPhoto(photo_id):
     return render_template('edit.html', photo = editedPhoto)
 
 
+
 # This is called when clicking on Delete. 
 @main.route('/photo/<int:photo_id>/delete/', methods = ['GET','POST'])
+@jwt_required() # Ensure that only authenticated users can upload photos
 def deletePhoto(photo_id):
-  fileResults = db.session.execute(text('select file from photo where id = ' + str(photo_id)))
-  filename = fileResults.first()[0]
-  filepath = os.path.join(current_app.config["UPLOAD_DIR"], filename)
+  user_id = get_jwt_identity()['id'] #JWT token
+  editedPhoto = Photo.query.get(photo_id)
+  if photo.user_id != user_id and not get_jwt_identity()['is_admin']:
+        flash('Unauthorized access', 'error')
+        return redirect(url_for('main.homepage'))
+
+
+  filepath = os.path.join(current_app.config["UPLOAD_DIR"], editedPhoto.file)
   os.unlink(filepath)
-  db.session.execute(text('delete from photo where id = ' + str(photo_id)))
+  db.session.delete(photo)
   db.session.commit()
-  
+ 
   flash('Photo id %s Successfully Deleted' % photo_id)
   return redirect(url_for('main.homepage'))
 
@@ -283,7 +335,47 @@ def delete_comment(comment_id):
 
     return jsonify({"message": "Comment deleted"}), 200
 
-# TESTING
+
+
+# TESTING for part 2 
+
+# Create photo upload XSS Test
+def test_photo_upload_sanitization():
+    """Test that uploaded photo metadata is sanitized to prevent XSS."""
+    malicious_script = "<script>alert('XSS');</script>"
+    response = self.client.post('/upload', data={'filename': malicious_script})
+    assert malicious_script not in Photo.query.first().filename
+
+# Create photo upload authentication Test
+ def test_upload_photo_unauthorized(self):
+  response = self.client.post('/upload', data=dict(
+    file=(io.BytesIO(b"fake image data"), 'test.jpg'),
+    description='Test photo'
+ ))
+ assert response.status_code == 401 
+
+# Create Photo Input Validation Test
+def test_upload_photo_invalid(self):
+  login_response = self.client.post('/login', data=json.dumps({
+     'username': 'testuser',
+            'password': 'testpassword'
+        }), content_type='application/json')
+        token = json.loads(login_response.data)['access_token']
+        response = self.client.post('/upload', headers={
+            'Authorization': f'Bearer {token}'
+        }, data=dict(
+            description='Test photo'
+        ))
+        assert response.status_code == 400
+        assert 'No file selected' in response.get_data(as_text=True)
+
+# Create password hashing Test
+def test_password_hashing(self):
+  user = User.query.filter_by(username='testuser').first()
+  self.assertNotEqual(user.password, 'testpassword')
+  self.assertTrue(check_password_hash(user.password, 'testpassword'))
+
+# TESTING for part 3 additional features
 
 # Create Album Authentication Test
 def test_create_album_unauthenticated(client):
@@ -309,4 +401,3 @@ def test_create_album_xss(client, authenticated_user):
     response = client.post('/albums/create', json={'name': xss_payload}, headers=authenticated_user)
     assert response.status_code == 201
     assert xss_payload not in response.json['album']['name']
-
