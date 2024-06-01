@@ -1,7 +1,7 @@
 from flask import (
   Blueprint, render_template, request, 
   flash, redirect, url_for, send_from_directory, 
-  current_app, make_response
+  current_app, make_response, jsonify, json
 )
 from .models import Photo
 from sqlalchemy import asc, text
@@ -77,4 +77,194 @@ def deletePhoto(photo_id):
   
   flash('Photo id %s Successfully Deleted' % photo_id)
   return redirect(url_for('main.homepage'))
+
+# Create a new album
+@main.route('/albums/create', methods=['POST'])
+def create_album():
+    
+    # Authenticate the user
+    user = authenticate_user()
+    if not user:
+        # 401 Unauthorized: User must be authenticated
+        response = make_response(json.dumps({"error": "Unauthorized"}), 401)
+        response.headers['Content-Type'] = 'application/json'
+        return response
+
+    # Validate the input
+    album_name = request.json.get('name')
+    if not album_name:
+        # 400 Bad Request: Album name cannot be empty
+        response = make_response(json.dumps({"error": "Album name cannot be empty"}), 400)
+        response.headers['Content-Type'] = 'application/json'
+        return response
+
+    # Create the new album
+    new_album = Album(user_id=user['id'], name=album_name)
+    db.session.add(new_album)
+    db.session.commit()
+    
+    # 201 Created: Album was successfully created
+    response = make_response(json.dumps({"message": "Album created", "album": new_album.serialize()}), 201)
+    response.headers['Content-Type'] = 'application/json'
+    return response
+
+# Add a photo to an album
+@main.route('/albums/<int:album_id>/add_photo', methods=['POST'])
+def add_photo_to_album(album_id):
+   
+    # Authenticate the user
+    user = authenticate_user()
+    if not user:
+        # 401 Unauthorized: User must be authenticated
+        response = make_response(json.dumps({"error": "Unauthorized"}), 401)
+        response.headers['Content-Type'] = 'application/json'
+        return response
+
+    # Check if the album belongs to the authenticated user
+    album = db.session.query(Album).filter_by(id=album_id, user_id=user['id']).one_or_none()
+    if not album:
+        # 404 Not Found: Album not found or not owned by user
+        response = make_response(json.dumps({"error": "Album not found or not owned by user"}), 404)
+        response.headers['Content-Type'] = 'application/json'
+        return response
+
+    # Validate the uploaded file
+    file = request.files.get("fileToUpload")
+    if not file or not file.filename:
+        # 400 Bad Request: No file selected
+        response = make_response(json.dumps({"error": "No file selected"}), 400)
+        response.headers['Content-Type'] = 'application/json'
+        return response
+
+    # Save the file to the upload directory
+    filepath = os.path.join(current_app.config["UPLOAD_DIR"], file.filename)
+    file.save(filepath)
+
+    # Create a new photo record
+    new_photo = Photo(
+        name=request.form.get('user', ''),
+        caption=request.form.get('caption', ''),
+        description=request.form.get('description', ''),
+        file=file.filename,
+        album_id=album_id
+    )
+    db.session.add(new_photo)
+    db.session.commit()
+
+    # 201 Created: Photo added to album
+    response = make_response(json.dumps({"message": "Photo added to album", "photo": new_photo.serialize()}), 201)
+    response.headers['Content-Type'] = 'application/json'
+    return response
+
+# View an album
+@main.route('/albums/<int:album_id>', methods=['GET'])
+def view_album(album_id):
+    album = db.session.query(Album).filter_by(id=album_id).one_or_none()
+    if not album:
+        response = make_response(json.dumps({"error": "Album not found"}), 404)
+        response.headers['Content-Type'] = 'application/json'
+        return response
+
+    photos = db.session.query(Photo).filter_by(album_id=album_id).all()
+    return render_template('album.html', album=album, photos=photos)
+
+# Edit an album
+@main.route('/albums/<int:album_id>/edit', methods=['PUT'])
+def edit_album(album_id):
+    user = authenticate_user()
+    if not user:
+        return jsonify({"error": "Unauthorized"}), 401  # Authentication check
+
+    album = db.session.query(Album).filter_by(id=album_id, user_id=user['id']).one_or_none()
+    if not album:
+        return jsonify({"error": "Album not found or not owned by user"}), 404  # Authorization check
+
+    album_name = request.json.get('name')
+    if album_name:
+        album.name = album_name  # Input validation
+
+    db.session.add(album)
+    db.session.commit()
+
+    return jsonify({"message": "Album updated", "album": album.serialize()}), 200
+
+# Delete an album
+@main.route('/albums/<int:album_id>/delete', methods=['DELETE'])
+def delete_album(album_id):
+    user = authenticate_user()
+    if not user:
+        return jsonify({"error": "Unauthorized"}), 401  # Authentication check
+
+    album = db.session.query(Album).filter_by(id=album_id, user_id=user['id']).one_or_none()
+    if not album:
+        return jsonify({"error": "Album not found or not owned by user"}), 404  # Authorization check
+
+    photos = db.session.query(Photo).filter_by(album_id=album_id).all()
+    for photo in photos:
+        filepath = os.path.join(current_app.config["UPLOAD_DIR"], photo.file)
+        if os.path.exists(filepath):
+            os.remove(filepath)  # Secure file handling
+        db.session.delete(photo)
+
+    db.session.delete(album)
+    db.session.commit()
+
+    return jsonify({"message": "Album and its photos deleted"}), 200
+
+# Add a comment to a photo
+@main.route('/photo/<int:photo_id>/comment', methods=['POST'])
+def add_comment(photo_id):
+    
+    # Authenticate the user
+    user = authenticate_user()
+    if not user:
+        # 401 Unauthorized: User must be authenticated
+        response = make_response(json.dumps({"error": "Unauthorized"}), 401)
+        response.headers['Content-Type'] = 'application/json'
+        return response
+
+    # Validate the comment content
+    content = request.json.get('content')
+    if not content:
+        # 400 Bad Request: Comment content cannot be empty
+        response = make_response(json.dumps({"error": "Comment content cannot be empty"}), 400)
+        response.headers['Content-Type'] = 'application/json'
+        return response
+
+    # Create a new comment
+    new_comment = Comment(photo_id=photo_id, user_id=user['id'], content=content)
+    db.session.add(new_comment)
+    db.session.commit()
+
+    # 201 Created: Comment was successfully added
+    response = make_response(json.dumps({"message": "Comment added", "comment": new_comment.serialize()}), 201)
+    response.headers['Content-Type'] = 'application/json'
+    return response
+
+# TESTING
+
+# Create Album Authentication Test
+def test_create_album_unauthenticated(client):
+    response = client.post('/albums/create', json={'name': 'New Album'})
+    assert response.status_code == 401
+    assert response.json['error'] == 'Unauthorized'
+
+# Create Album Input Validation Test
+def test_create_album_no_name(client, authenticated_user):
+    response = client.post('/albums/create', json={}, headers=authenticated_user)
+    assert response.status_code == 400
+    assert response.json['error'] == 'Album name cannot be empty'
+
+# Create Album SQL Injection Test 
+def test_create_album_sql_injection(client, authenticated_user):
+    response = client.post('/albums/create', json={'name': "'; DROP TABLE albums; --"}, headers=authenticated_user)
+    assert response.status_code == 201
+    assert 'album' in response.json
+
+# Create Album XSS Test 
+def test_create_album_xss(client, authenticated_user):
+    xss_payload = '<script>alert("XSS")</script>'
+    response = client.post('/albums/create', json={'name': xss_payload}, headers=authenticated_user)
+    assert response.status_code == 201
+    assert xss_payload not in response.json['album']['name']
 
